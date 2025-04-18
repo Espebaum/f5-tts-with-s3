@@ -42,7 +42,8 @@ last_device = ""
 last_ema = None
 
 
-path_data = str(files("f5_tts").joinpath("../../data"))
+# path_data = str(files("f5_tts").joinpath("../../data"))
+path_data = "/mnt/e/home/gyopark/F5-TTS/data"
 path_project_ckpts = str(files("f5_tts").joinpath("../../ckpts"))
 file_train = str(files("f5_tts").joinpath("train/finetune_cli.py"))
 
@@ -1000,147 +1001,261 @@ def expand_model_embeddings(ckpt_path, new_ckpt_path, num_new_tokens=42):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-    if ckpt_path.endswith(".safetensors"):
-        ckpt = load_file(ckpt_path, device="cpu")
-        ckpt = {"ema_model_state_dict": ckpt}
-    elif ckpt_path.endswith(".pt"):
-        ckpt = torch.load(ckpt_path, map_location="cpu")
+    ckpt = load_file(ckpt_path, device="cpu")
 
-    ema_sd = ckpt.get("ema_model_state_dict", {})
-    embed_key_ema = "ema_model.transformer.text_embed.text_embed.weight"
-    old_embed_ema = ema_sd[embed_key_ema]
+    embed_key = "ema_model.transformer.text_embed.text_embed.weight"
+    if embed_key not in ckpt:
+        raise KeyError(f"❌ Key '{embed_key}' not found in checkpoint. Available keys:\n{list(ckpt.keys())[:5]}...")
 
-    vocab_old = old_embed_ema.size(0)
-    embed_dim = old_embed_ema.size(1)
+    old_embed = ckpt[embed_key]
+    vocab_old, embed_dim = old_embed.size()
     vocab_new = vocab_old + num_new_tokens
 
-    def expand_embeddings(old_embeddings):
-        new_embeddings = torch.zeros((vocab_new, embed_dim))
-        new_embeddings[:vocab_old] = old_embeddings
-        new_embeddings[vocab_old:] = torch.randn((num_new_tokens, embed_dim))
-        return new_embeddings
+    print(f"📐 Expanding embedding from {vocab_old} to {vocab_new} tokens.")
 
-    ema_sd[embed_key_ema] = expand_embeddings(ema_sd[embed_key_ema])
+    # 새 임베딩 생성
+    new_embed = torch.zeros((vocab_new, embed_dim))
+    new_embed[:vocab_old] = old_embed
+    new_embed[vocab_old:] = torch.randn((num_new_tokens, embed_dim))
 
-    if new_ckpt_path.endswith(".safetensors"):
-        save_file(ema_sd, new_ckpt_path)
-    elif new_ckpt_path.endswith(".pt"):
-        torch.save(ckpt, new_ckpt_path)
+    # 업데이트
+    ckpt[embed_key] = new_embed
 
+    # 저장
+    save_file(ckpt, new_ckpt_path)
+    print(f"✅ Saved expanded checkpoint to {new_ckpt_path}")
     return vocab_new
 
 
 def vocab_count(text):
     return str(len(text.split(",")))
 
+import boto3
+import io
+
+def write_file_s3(bucket, key, content, content_type="text/plain"):
+    """
+    S3에 문자열을 파일로 저장하는 함수.
+
+    Args:
+        bucket (str): S3 버킷 이름 (예: "my-bucket")
+        key (str): 저장할 S3 키 경로 (예: "path/to/file.txt")
+        content (str): 저장할 문자열 데이터
+        content_type (str): MIME 타입 (기본값은 text/plain)
+
+    Returns:
+        str: s3:// 경로 문자열
+    """
+    s3 = boto3.client("s3")
+    s3.put_object(
+        Bucket=bucket,
+        Key=key,
+        Body=content.encode("utf-8"),
+        ContentType=content_type
+    )
+    print(f"✅ Uploaded to s3://{bucket}/{key}")
+    return f"s3://{bucket}/{key}"
+
 
 def vocab_extend(project_name, symbols, model_type):
-    if symbols == "":
+    if not symbols:
         return "Symbols empty!"
 
-    name_project = project_name
-    path_project = os.path.join(path_data, name_project)
-    file_vocab_project = os.path.join(path_project, "vocab.txt")
-
-    file_vocab = os.path.join(path_data, "Emilia_ZH_EN_pinyin/vocab.txt")
-    if not os.path.isfile(file_vocab):
-        return f"the file {file_vocab} not found !"
-
-    symbols = symbols.split(",")
-    if symbols == []:
+    symbols = [s.strip() for s in symbols.split(",") if s.strip()]
+    if not symbols:
         return "Symbols to extend not found."
 
-    with open(file_vocab, "r", encoding="utf-8-sig") as f:
-        data = f.read()
-        vocab = data.split("\n")
-    vocab_check = set(vocab)
+    # Determine source of vocab and target of writing
+    is_s3 = project_name.startswith("s3://")
 
-    miss_symbols = []
-    for item in symbols:
-        item = item.replace(" ", "")
-        if item in vocab_check:
-            continue
-        miss_symbols.append(item)
+    if is_s3:
+        vocab_path = "s3://kmpark-seoul/vocab.txt"
+        bucket, key = parse_s3_path(vocab_path)
+        vocab_content = read_file_s3(bucket, key)
+        vocab = vocab_content.strip().splitlines()
+        vocab_check = set(vocab)
+    else:
+        path_project = os.path.join(path_data, project_name)
+        file_vocab_project = os.path.join(path_project, "vocab.txt")
+        file_vocab = os.path.join(path_data, "Emilia_ZH_EN_pinyin/vocab.txt")
 
-    if miss_symbols == []:
-        return "Symbols are okay no need to extend."
+        if not os.path.isfile(file_vocab):
+            return f"the file {file_vocab} not found !"
 
-    size_vocab = len(vocab)
-    vocab.pop()
-    for item in miss_symbols:
-        vocab.append(item)
+        with open(file_vocab, "r", encoding="utf-8-sig") as f:
+            vocab = f.read().splitlines()
+        vocab_check = set(vocab)
 
-    vocab.append("")
+    # Find missing symbols
+    miss_symbols = [s for s in symbols if s not in vocab_check]
+    if not miss_symbols:
+        return "Symbols are already present in vocab, no need to extend."
 
-    with open(file_vocab_project, "w", encoding="utf-8") as f:
-        f.write("\n".join(vocab))
+    # Append missing symbols
+    vocab = vocab + miss_symbols
 
+    # Save updated vocab
+    if is_s3:
+        updated_vocab = "\n".join(vocab) + "\n"
+        write_file_s3(bucket, key, updated_vocab)
+        print("✅ Updated vocab.txt on S3.")
+    else:
+        os.makedirs(os.path.dirname(file_vocab_project), exist_ok=True)
+        with open(file_vocab_project, "w", encoding="utf-8") as f:
+            f.write("\n".join(vocab) + "\n")
+
+    # Checkpoint path logic
     if model_type == "F5TTS_v1_Base":
         ckpt_path = str(cached_path("hf://SWivid/F5-TTS/F5TTS_v1_Base/model_1250000.safetensors"))
     elif model_type == "F5TTS_Base":
         ckpt_path = str(cached_path("hf://SWivid/F5-TTS/F5TTS_Base/model_1200000.pt"))
     elif model_type == "E2TTS_Base":
         ckpt_path = str(cached_path("hf://SWivid/E2-TTS/E2TTS_Base/model_1200000.pt"))
+    else:
+        return "Unknown model type"
 
-    vocab_size_new = len(miss_symbols)
+    # Save extended ckpt locally
+    new_ckpt_file = "/home/ubuntu/f5/ckpts/pretrained_F5TTS_v1_Base_extended.safetensors"
+    new_vocab_size = expand_model_embeddings(ckpt_path, new_ckpt_file, num_new_tokens=len(miss_symbols))
 
-    dataset_name = name_project.replace("_pinyin", "").replace("_char", "")
-    new_ckpt_path = os.path.join(path_project_ckpts, dataset_name)
-    os.makedirs(new_ckpt_path, exist_ok=True)
+    return f"vocab old size : {len(vocab) - len(miss_symbols)}\nvocab new size : {new_vocab_size}\nvocab add : {len(miss_symbols)}\nnew symbols :\n" + "\n".join(miss_symbols)
 
-    # Add pretrained_ prefix to model when copying for consistency with finetune_cli.py
-    new_ckpt_file = os.path.join(new_ckpt_path, "pretrained_" + os.path.basename(ckpt_path))
+def list_csv_keys_in_s3(bucket, prefix):
+    """S3에서 주어진 prefix 하위의 모든 CSV 파일 key를 반환"""
+    s3 = boto3.client("s3", region_name="ap-northeast-2")
+    paginator = s3.get_paginator("list_objects_v2")
+    pages = paginator.paginate(Bucket=bucket, Prefix=prefix)
+    # print(f"[DEBUG] Bucket: {bucket}")
+    # print(f"[DEBUG] Prefix: {prefix}")
+    csv_keys = []
+    for page_number, page in enumerate(pages):
+        # print(f"[DEBUG] Page {page_number} keys:")
+        for obj in page.get("Contents", []):
+            # print("  →", obj["Key"])
+            key = obj["Key"]
+            if key.endswith(".csv"):
+                csv_keys.append(key)
+    return csv_keys
 
-    size = expand_model_embeddings(ckpt_path, new_ckpt_file, num_new_tokens=vocab_size_new)
+def read_file_s3(bucket, key):
+    s3 = boto3.client("s3", region_name="ap-northeast-2")
+    response = s3.get_object(Bucket=bucket, Key=key)
+    # print(bucket, key)
+    return response["Body"].read().decode("utf-8-sig")
 
-    vocab_new = "\n".join(miss_symbols)
-    return f"vocab old size : {size_vocab}\nvocab new size : {size}\nvocab add : {vocab_size_new}\nnew symbols :\n{vocab_new}"
+def parse_s3_path(s3_path):
+    assert s3_path.startswith("s3://"), f"Invalid S3 path: {s3_path}"
+    s3_path = s3_path.strip().replace(" ", "")  # ← 공백 제거
+    parts = s3_path[5:].split("/", 1)  # remove 's3://'
+    if len(parts) == 1:
+        parts.append("")
+    return parts[0], parts[1]  # bucket, key
 
+import csv
+import io
+import unicodedata
+
+def is_valid_symbol(sym):
+    return len(sym) == 1 and sym.strip() and ord(sym) >= 0x20
 
 def vocab_check(project_name):
-    name_project = project_name
-    path_project = os.path.join(path_data, name_project)
+    project_name = project_name.strip()
+    if project_name.startswith("s3://"):
+        project_name = "s3://deeploading-aidubbing/Emilia-Dataset/Emilia-YODAS/KO/metadata"
+        vocab_data = "s3://kmpark-seoul/vocab.txt"
+        print("PROJECT NAME", project_name)
 
-    file_metadata = os.path.join(path_project, "metadata.csv")
+        # metadata.csv 목록 추출
+        bucket, prefix = parse_s3_path(project_name.rstrip("/"))
+        csv_keys = list_csv_keys_in_s3(bucket, prefix)
+        if not csv_keys:
+            return f"❌ No .csv files found under s3://{bucket}/{prefix}", ""
 
-    file_vocab = os.path.join(path_data, "Emilia_ZH_EN_pinyin/vocab.txt")
-    if not os.path.isfile(file_vocab):
-        return f"the file {file_vocab} not found !", ""
+        # vocab.txt 로드
+        vocab_bucket, vocab_key = parse_s3_path(vocab_data)
+        vocab_content = read_file_s3(vocab_bucket, vocab_key)
+        vocab = set(unicodedata.normalize("NFKC", line.strip()) for line in vocab_content.splitlines() if line.strip())
+        print(f"✅ Loaded vocab from s3://{vocab_bucket}/{vocab_key} — {len(vocab)} tokens")
 
-    with open(file_vocab, "r", encoding="utf-8-sig") as f:
-        data = f.read()
-        vocab = data.split("\n")
-        vocab = set(vocab)
+        # metadata 전체 로딩
+        lines_to_check = []
+        for key in csv_keys:
+            try:
+                content = read_file_s3(bucket, key)
+                lines_to_check.extend(content.splitlines())
+            except Exception as e:
+                print(f"⚠️ Failed to read {key} from S3: {e}")
+                continue
+    else:
+        # 로컬 모드
+        path_project = os.path.join(path_data, project_name)
+        file_metadata = os.path.join(path_project, "metadata.csv")
+        file_vocab = os.path.join(path_data, "Emilia_ZH_EN_pinyin/vocab.txt")
 
-    if not os.path.isfile(file_metadata):
-        return f"the file {file_metadata} not found !", ""
+        if not os.path.isfile(file_vocab):
+            return f"the file {file_vocab} not found !", ""
+        with open(file_vocab, "r", encoding="utf-8-sig") as f:
+            vocab = set(unicodedata.normalize("NFKC", line.strip()) for line in f if line.strip())
 
-    with open(file_metadata, "r", encoding="utf-8-sig") as f:
-        data = f.read()
+        if not os.path.isfile(file_metadata):
+            return f"the file {file_metadata} not found !", ""
+        with open(file_metadata, "r", encoding="utf-8-sig") as f:
+            lines_to_check = f.read().splitlines()
 
-    miss_symbols = []
-    miss_symbols_keep = {}
-    for item in data.split("\n"):
-        sp = item.split("|")
-        if len(sp) != 2:
+    # pretrained vocab
+    pretrain_vocab_path = "s3://kmpark-seoul/pretrained/vocab.txt"
+    pretrain_bucket, pretrain_key = parse_s3_path(pretrain_vocab_path)
+    pretrain_vocab_content = read_file_s3(pretrain_bucket, pretrain_key)
+    pretrain_vocab = set(unicodedata.normalize("NFKC", line.strip()) for line in pretrain_vocab_content.splitlines() if line.strip())
+
+    diff_symbols = [sym for sym in vocab if sym not in pretrain_vocab and is_valid_symbol(sym)]
+
+    # --- text 필드 파싱
+    text_data = []
+    csv_text = "\n".join(lines_to_check)
+    reader = csv.DictReader(io.StringIO(csv_text), delimiter=',')  # ✅ 수정됨
+
+    for row in reader:
+        if "text" not in row:
             continue
+        text = row["text"].strip().strip('"').strip("'")
+        if text:
+            normalized = unicodedata.normalize("NFKC", text)
+            text_data.append(normalized)
 
-        text = sp[1].lower().strip()
+    # --- 교집합으로 비교
+    text_chars = set(char for line in text_data for char in line)
+    miss_symbols = [char for char in diff_symbols if char in text_chars]
 
-        for t in text:
-            if t not in vocab and t not in miss_symbols_keep:
-                miss_symbols.append(t)
-                miss_symbols_keep[t] = t
+    # print("[DEBUG] Found actual characters in metadata:", sorted(text_chars & set(diff_symbols)))
+    # print(f"[DEBUG] First 5 diff_symbols to search in metadata: {diff_symbols[:5]}")
+    # print("[DEBUG] Sampling some actual text from metadata:")
+    # for line in text_data[:5]:
+        # print("  →", line)
+    
+    # 직접 확인
+    found = []
+    for sym in diff_symbols[:20]:  # 20개 정도 확인
+        for line in text_data:
+            if sym in line:
+                found.append(sym)
+                break
+    print(f"[DEBUG] Actually found in metadata: {found}")
 
-    if miss_symbols == []:
-        vocab_miss = ""
-        info = "You can train using your language !"
+    # diff_symbols 중 실제 metadata에 존재하는 것만 추출
+    text_chars = set(char for line in text_data for char in line)
+    miss_symbols = [char for char in diff_symbols if char in text_chars]
+
+    print("[DEBUG] Pretrain vocab size:", len(pretrain_vocab))
+    print("[DEBUG] Custom vocab size:", len(vocab))
+    print("[DEBUG] Found missing symbols in metadata:", miss_symbols[:10])
+
+    if not miss_symbols:
+        return "You can train using your language !", ""
     else:
         vocab_miss = ",".join(miss_symbols)
         info = f"The following {len(miss_symbols)} symbols are missing in your language\n\n"
-
-    return info, vocab_miss
-
+        return info, vocab_miss
 
 def get_random_sample_prepare(project_name):
     name_project = project_name
@@ -1196,6 +1311,7 @@ def get_random_sample_infer(project_name):
 def infer(
     project, file_checkpoint, exp_name, ref_text, ref_audio, gen_text, nfe_step, use_ema, speed, seed, remove_silence
 ):
+    print("Pathdata, project", path_data, project)
     global last_checkpoint, last_device, tts_api, last_ema
 
     if not os.path.isfile(file_checkpoint):
@@ -1217,7 +1333,7 @@ def infer(
             last_ema = use_ema
 
         vocab_file = os.path.join(path_data, project, "vocab.txt")
-
+        print("vocab_file", vocab_file)
         tts_api = F5TTS(
             model=exp_name, ckpt_file=file_checkpoint, vocab_file=vocab_file, device=device_test, use_ema=use_ema
         )
@@ -1245,38 +1361,73 @@ def check_finetune(finetune):
     return gr.update(interactive=finetune), gr.update(interactive=finetune), gr.update(interactive=finetune)
 
 
-def get_checkpoints_project(project_name, is_gradio=True):
-    if project_name is None:
-        return [], ""
-    project_name = project_name.replace("_pinyin", "").replace("_char", "")
+# def get_checkpoints_project(project_name, is_gradio=True):
+#     if project_name is None:
+#         return [], ""
+#     project_name = project_name.replace("_pinyin", "").replace("_char", "")
 
-    if os.path.isdir(path_project_ckpts):
-        files_checkpoints = glob(os.path.join(path_project_ckpts, project_name, "*.pt"))
-        # Separate pretrained and regular checkpoints
-        pretrained_checkpoints = [f for f in files_checkpoints if "pretrained_" in os.path.basename(f)]
-        regular_checkpoints = [
-            f
-            for f in files_checkpoints
-            if "pretrained_" not in os.path.basename(f) and "model_last.pt" not in os.path.basename(f)
-        ]
-        last_checkpoint = [f for f in files_checkpoints if "model_last.pt" in os.path.basename(f)]
+#     if os.path.isdir(path_project_ckpts):
+#         files_checkpoints = glob(os.path.join(path_project_ckpts, project_name, "*.pt"))
+#         # Separate pretrained and regular checkpoints
+#         pretrained_checkpoints = [f for f in files_checkpoints if "pretrained_" in os.path.basename(f)]
+#         regular_checkpoints = [
+#             f
+#             for f in files_checkpoints
+#             if "pretrained_" not in os.path.basename(f) and "model_last.pt" not in os.path.basename(f)
+#         ]
+#         last_checkpoint = [f for f in files_checkpoints if "model_last.pt" in os.path.basename(f)]
 
-        # Sort regular checkpoints by number
-        regular_checkpoints = sorted(
-            regular_checkpoints, key=lambda x: int(os.path.basename(x).split("_")[1].split(".")[0])
-        )
+#         # Sort regular checkpoints by number
+#         regular_checkpoints = sorted(
+#             regular_checkpoints, key=lambda x: int(os.path.basename(x).split("_")[1].split(".")[0])
+#         )
 
-        # Combine in order: pretrained, regular, last
-        files_checkpoints = pretrained_checkpoints + regular_checkpoints + last_checkpoint
-    else:
+#         # Combine in order: pretrained, regular, last
+#         files_checkpoints = pretrained_checkpoints + regular_checkpoints + last_checkpoint
+#     else:
+#         files_checkpoints = []
+
+#     selelect_checkpoint = None if not files_checkpoints else files_checkpoints[0]
+
+#     if is_gradio:
+#         return gr.update(choices=files_checkpoints, value=selelect_checkpoint)
+
+#     return files_checkpoints, selelect_checkpoint
+
+def get_checkpoints_project(project_name=None, is_gradio=True):
+    ckpt_dir = "/mnt/e/home/gyopark/F5-TTS/ckpts"
+
+    if not os.path.isdir(ckpt_dir):
         files_checkpoints = []
+    else:
+        # 모든 하위 폴더까지 조회
+        files_checkpoints = glob(os.path.join(ckpt_dir, "**", "*.pt"), recursive=True)
 
-    selelect_checkpoint = None if not files_checkpoints else files_checkpoints[0]
+        # 그룹화 및 정렬
+        pretrained_checkpoints = [f for f in files_checkpoints if "pretrained_" in os.path.basename(f)]
+        last_checkpoint = [f for f in files_checkpoints if "model_last.pt" in os.path.basename(f)]
+        regular_checkpoints = [
+            f for f in files_checkpoints
+            if "pretrained_" not in os.path.basename(f)
+            and "model_last.pt" not in os.path.basename(f)
+        ]
+
+        def safe_key(x):
+            try:
+                return int(os.path.basename(x).split("_")[1].split(".")[0])
+            except:
+                return float("inf")
+
+        regular_checkpoints = sorted(regular_checkpoints, key=safe_key)
+        files_checkpoints = pretrained_checkpoints + regular_checkpoints + last_checkpoint
+
+    selelect_checkpoint = files_checkpoints[0] if files_checkpoints else None
 
     if is_gradio:
         return gr.update(choices=files_checkpoints, value=selelect_checkpoint)
 
     return files_checkpoints, selelect_checkpoint
+
 
 
 def get_audio_project(project_name, is_gradio=True):
@@ -1790,7 +1941,8 @@ Check the use_ema setting (True or False) for your model to see what works best 
             exp_name = gr.Radio(
                 label="Model", choices=["F5TTS_v1_Base", "F5TTS_Base", "E2TTS_Base"], value="F5TTS_v1_Base"
             )
-            list_checkpoints, checkpoint_select = get_checkpoints_project(projects_selelect, False)
+            # list_checkpoints, checkpoint_select = get_checkpoints_project(projects_selelect, False)
+            list_checkpoints, checkpoint_select = get_checkpoints_project(None, False) # 내꺼만
 
             with gr.Row():
                 nfe_step = gr.Number(label="NFE Step", value=32)

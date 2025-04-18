@@ -33,7 +33,7 @@ def update_multiple_csvs_with_sub(bucket, base_prefix, start=2, end=26, region="
 # 실행
 update_multiple_csvs_with_sub(
     bucket="deeploading-aidubbing",
-    base_prefix="Emilia-Dataset/Emilia/KO/metadata",
+    base_prefix="Emilia-Dataset/Emilia-YODAS/KO/metadata",
     start=0,
-    end=39
+    end=207
 )

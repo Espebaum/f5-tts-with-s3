@@ -25,10 +25,50 @@ from f5_tts.model.utils import (
     convert_char_to_pinyin,
 )
 
-PRETRAINED_VOCAB_PATH = files("f5_tts").joinpath("../../data/Emilia_ZH_EN_pinyin/vocab.txt")
+# PRETRAINED_VOCAB_PATH = files("f5_tts").joinpath("../../data/Emilia_ZH_EN_pinyin/vocab.txt")
+PRETRAINED_VOCAB_PATH = Path("/mnt/e/home/gyopark/F5-TTS/data/Emilia_ZH_EN_pinyin/vocab.txt")
 
 # ---
 from datasets.features import Features, Value
+
+def merge_vocab_and_save(pretrained_s3_path, current_vocab_path, output_s3_path):
+    print(f"☁️ Merging vocab from {pretrained_s3_path} and {current_vocab_path} to {output_s3_path}")
+
+    def parse_s3_path(s3_path):
+        assert s3_path.startswith("s3://")
+        parts = s3_path.replace("s3://", "").split("/", 1)
+        return parts[0], parts[1]
+
+    def read_vocab_from_s3(s3_path):
+        bucket, key = parse_s3_path(s3_path)
+        s3 = boto3.client("s3", region_name="ap-northeast-2")
+        response = s3.get_object(Bucket=bucket, Key=key)
+        return [line.strip() for line in response["Body"].read().decode("utf-8").splitlines() if line.strip()]
+
+    def read_vocab_from_local(path):
+        with open(path, "r", encoding="utf-8") as f:
+            return [line.strip() for line in f if line.strip()]
+
+    def write_vocab_to_s3(vocab_list, s3_path):
+        bucket, key = parse_s3_path(s3_path)
+        body = "\n" + "\n".join(vocab_list) + "\n"  # ← 앞에 개행 추가
+        boto3.client("s3", region_name="ap-northeast-2").put_object(
+            Bucket=bucket, Key=key, Body=body.encode("utf-8")
+        )
+    # Load vocabs
+    pretrained_vocab = read_vocab_from_s3(pretrained_s3_path)
+    new_vocab = read_vocab_from_local(current_vocab_path)
+
+    # Build merged vocab (preserve order)
+    pretrained_set = set(pretrained_vocab)
+    final_vocab = pretrained_vocab + [tok for tok in new_vocab if tok not in pretrained_set]
+
+    # Save
+    write_vocab_to_s3(final_vocab, output_s3_path)
+    print(f"☁️ Merged vocab saved to {output_s3_path}")
+    print("수정 완료")
+    return len(final_vocab)
+
 
 def parse_s3_path(s3_path: str):
     """
@@ -350,7 +390,6 @@ def save_prepped_dataset(out_dir, result, duration_list, text_vocab_set, is_fine
 
     print(f"\n✅ Saving to temporary path: {temp_dir}")
 
-    # 🔒 필터
     cleaned_result = [
         {
             "audio_path": r["audio_path"],
@@ -367,32 +406,47 @@ def save_prepped_dataset(out_dir, result, duration_list, text_vocab_set, is_fine
     print(f"📋 Cleaned result count: {len(cleaned_result)}")
     print("🔍 Sample of cleaned_result:", cleaned_result[:2])
 
-    # ✅ pyarrow로 확정된 .arrow 파일 저장
+    # File paths
     raw_arrow_path = temp_dir / "raw.arrow"
-    save_arrow_file_with_pyarrow(cleaned_result, raw_arrow_path)
+    dur_json_path = temp_dir / "duration.json"
+    voca_out_path = temp_dir / "vocab.txt"
 
+    # Save Arrow
+    save_arrow_file_with_pyarrow(cleaned_result, raw_arrow_path)
     if raw_arrow_path.stat().st_size == 0:
         raise RuntimeError("❌ raw.arrow file is 0 bytes. Something went wrong.")
 
-    # 🔧 duration.json 저장
-    dur_json_path = temp_dir / "duration.json"
+    # Save duration
     with open(dur_json_path, "w", encoding="utf-8") as f:
         json.dump({"duration": duration_list}, f, ensure_ascii=False)
 
-    # 🔧 vocab.txt 저장
-    voca_out_path = temp_dir / "vocab.txt"
+    # Save vocab
     if is_finetune:
         shutil.copy2(PRETRAINED_VOCAB_PATH, voca_out_path)
+        merged_vocab_size = len(set(open(PRETRAINED_VOCAB_PATH).read().splitlines()))
     else:
         with open(voca_out_path, "w", encoding="utf-8") as f:
             for vocab in sorted(text_vocab_set):
                 f.write(vocab + "\n")
+        merged_vocab_size = len(text_vocab_set)
 
-    # ✅ 업로드 or 로컬 이동
     if is_s3:
+        # Merge and upload vocab
+        merged_vocab_s3_path = "s3://kmpark-seoul/vocab.txt"
+        if not is_finetune:
+            merged_vocab_size = merge_vocab_and_save(
+                pretrained_s3_path="s3://kmpark-seoul/pretrained/vocab.txt",
+                current_vocab_path=str(voca_out_path),
+                output_s3_path=merged_vocab_s3_path,
+            )
+            print(f"☁️ Uploaded merged vocab to: {merged_vocab_s3_path} (✅ size: {merged_vocab_size})")
+        else:
+            print(f"☁️ Uploaded vocab from fine-tuned base (no merge). Size: {merged_vocab_size}")
+
+        # Upload arrow and duration
         s3 = boto3.client("s3", region_name="ap-northeast-2")
         bucket, prefix = parse_s3_path(str(out_dir))
-        for file in [raw_arrow_path, dur_json_path, voca_out_path]:
+        for file in [raw_arrow_path, dur_json_path]:
             key = f"{prefix.rstrip('/')}/{file.name}" if prefix.strip() else file.name
             print(f"☁️ Uploading {file.name} to s3://{bucket}/{key}")
             s3.upload_file(str(file), bucket, key)
@@ -404,7 +458,10 @@ def save_prepped_dataset(out_dir, result, duration_list, text_vocab_set, is_fine
         shutil.move(str(voca_out_path), out_dir / "vocab.txt")
 
     print(f"\n✅ Dataset saved to: {out_dir}")
-    print(f"🔢 Sample count: {len(result)} | 🔤 Vocab size: {len(text_vocab_set)} | ⏱ Total hours: {sum(duration_list)/3600:.2f}")
+    print(f"🔢 Sample count: {len(result)}")
+    print(f"🔤 Current dataset vocab size: {len(text_vocab_set)}")
+    print(f"🔀 Merged vocab size (saved): {merged_vocab_size}")
+    print(f"⏱ Total hours: {sum(duration_list)/3600:.2f}")
 
 
 from datasets import Dataset
@@ -506,7 +563,7 @@ Examples:
             args.inp_dir,
             args.out_dir,
             wav_root=args.wav_root,   # ← 이거 추가
-            is_finetune=not args.pretrain,
+            is_finetune=args.pretrain,
             num_workers=args.workers
         )
     except KeyboardInterrupt:

@@ -62,32 +62,54 @@ DEFAULT_TTS_MODEL = "F5-TTS_v1"
 tts_model_choice = DEFAULT_TTS_MODEL
 
 DEFAULT_TTS_MODEL_CFG = [
-    "/home/gyopark/F5-TTS/ckpts/F5TTS_v1_Base_vocos_custom/model_10.pt",
+    "/mnt/e/home/gyopark/F5-TTS/ckpts/emilia_l40/model_last.pt",
     "s3://kmpark-seoul/vocab.txt",
     json.dumps(dict(dim=1024, depth=22, heads=16, ff_mult=2, text_dim=512, conv_layers=4)),
 ]
 
 # DEFAULT_TTS_MODEL_CFG = [
-#     "hf://SWivid/F5-TTS/F5TTS_v1_Base/model_1250000.safetensors",
-#     "hf://SWivid/F5-TTS/F5TTS_v1_Base/vocab.txt",
+#     "/mnt/e/home/gyopark/F5-TTS/ckpts/emilia_l40/pretrained_F5TTS_v1_Base_extended_direct.safetensors",
+#     "s3://kmpark-seoul/vocab.txt",
 #     json.dumps(dict(dim=1024, depth=22, heads=16, ff_mult=2, text_dim=512, conv_layers=4)),
 # ]
+
+# DEFAULT_TTS_MODEL_CFG = [
+#     "hf://SWivid/F5-TTS/F5TTS_v1_Base/model_1250000.safetensors",
+#     "/mnt/e/home/gyopark/F5-TTS/data/Emilia_ZH_EN_pinyin/vocab.txt",
+#     json.dumps(dict(dim=1024, depth=22, heads=16, ff_mult=2, text_dim=512, conv_layers=4)),
+# ]
+
+from f5_tts.train.finetune_gradio import expand_model_embeddings
+
 
 # load models
 
 vocoder = load_vocoder()
 
 def load_f5tts():
-    ckpt_path = str(cached_path(DEFAULT_TTS_MODEL_CFG[0]))
+    ckpt_path = str(cached_path(DEFAULT_TTS_MODEL_CFG[0]))  # model_1250000.safetensors
     F5TTS_model_cfg = json.loads(DEFAULT_TTS_MODEL_CFG[2])
-    vocab_path = DEFAULT_TTS_MODEL_CFG[1]
+    vocab_path = DEFAULT_TTS_MODEL_CFG[1]  # could be s3:// or hf://
 
     # 🔽 S3인 경우 로컬에 다운로드
     if vocab_path.startswith("s3://"):
         vocab_local_path = "/tmp/f5tts_vocab.txt"
         download_s3_file(vocab_path, vocab_local_path)
+
+        # 🔽 마지막 한 줄 제거
+        with open(vocab_local_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+
+        with open(vocab_local_path, "w", encoding="utf-8") as f:
+            f.writelines(lines[:-1])  # 마지막 줄 제외하고 다시 씀
+
         vocab_path = vocab_local_path
 
+    # ✅ hf://인 경우도 캐시 경로로 다운로드
+    elif vocab_path.startswith("hf://"):
+        vocab_path = str(cached_path(vocab_path))
+
+    print("✅ vocab path resolved:", vocab_path)
     return load_model(DiT, F5TTS_model_cfg, ckpt_path, vocab_file=vocab_path)
 
 def load_e2tts():

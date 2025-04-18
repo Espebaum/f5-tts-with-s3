@@ -69,24 +69,26 @@ class HFDataset(Dataset):
         text = row["text"]
         return dict(mel_spec=mel_spec, text=text)
 
-def load_audio_from_s3(bucket_name, key, chunk_size=1024):
-    """
-    S3 버킷에서 지정한 음성 파일을 스트리밍 방식으로 읽어 torchaudio로 로드합니다.
-    """
-    s3 = boto3.client('s3', region_name='ap-northeast-2')  # 버킷 리전에 맞게 수정
-    response = s3.get_object(Bucket=bucket_name, Key=key)
-    streaming_body = response['Body']
-    
+def load_audio_from_s3(bucket_name, key):
+    import boto3, io, torchaudio
+    from botocore.exceptions import ClientError
+
+    # print(f"[🔎] Attempting to download from s3://{bucket_name}/{key}")  # ✅ 추가된 로그
+
+    s3 = boto3.client('s3', region_name='ap-northeast-2')
     audio_buffer = io.BytesIO()
-    while True:
-        chunk = streaming_body.read(chunk_size)
-        if not chunk:
-            break
-        audio_buffer.write(chunk)
-    
-    audio_buffer.seek(0)
-    waveform, sample_rate = torchaudio.load(audio_buffer)
-    return waveform, sample_rate
+    try:
+        s3.download_fileobj(bucket_name, key, audio_buffer)
+        audio_buffer.seek(0)
+        waveform, sample_rate = torchaudio.load(audio_buffer)
+        return waveform, sample_rate
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "404" or e.response["Error"]["Code"] == "NoSuchKey":
+            raise RuntimeError(f"[S3] 404 Not Found: s3://{bucket_name}/{key}")
+        raise RuntimeError(f"[S3] ClientError on key: s3://{bucket_name}/{key} — {e}")
+    except Exception as e:
+        raise RuntimeError(f"[S3] Unknown error for s3://{bucket_name}/{key}: {e}")
+
 
 class CustomDataset(Dataset):
     def __init__(
@@ -135,44 +137,41 @@ class CustomDataset(Dataset):
         return len(self.data)
 
     def __getitem__(self, index):
-        # 반복하여 유효한 항목을 찾음 (duration 필터링)
         while True:
             row = self.data[index]
             audio_path = row["audio_path"]
             text = row["text"]
             duration = row["duration"]
+            # print("AUDIOPATH", audio_path)
 
-            if 0.3 <= duration <= 30:
-                break
-            index = (index + 1) % len(self.data)
+            if not (0.3 <= duration <= 30):
+                index = (index + 1) % len(self.data)
+                continue
+            try:
+                if self.preprocessed_mel:
+                    mel_spec = torch.tensor(row["mel_spec"])
+                else:
+                    if audio_path.startswith("s3://"):
+                        parts = audio_path.split("/")
+                        bucket_name = parts[2]
+                        key = "/".join(parts[3:])
+                        audio, source_sample_rate = load_audio_from_s3(bucket_name, key)
+                    else:
+                        audio, source_sample_rate = torchaudio.load(audio_path)
 
-        if self.preprocessed_mel:
-            mel_spec = torch.tensor(row["mel_spec"])
-        else:
-            # audio_path가 S3 경로(s3://...)이면, 스트리밍으로 로드
-            if audio_path.startswith("s3://"):
-                # s3://your-bucket-name/경로... 형식이라 가정
-                parts = audio_path.split("/")
-                bucket_name = parts[2]
-                key = "/".join(parts[3:])
-                audio, source_sample_rate = load_audio_from_s3(bucket_name, key)
-            else:
-                audio, source_sample_rate = torchaudio.load(audio_path)
+                    if audio.shape[0] > 1:
+                        audio = torch.mean(audio, dim=0, keepdim=True)
+                    if source_sample_rate != self.target_sample_rate:
+                        resampler = torchaudio.transforms.Resample(source_sample_rate, self.target_sample_rate)
+                        audio = resampler(audio)
+                    mel_spec = self.mel_spectrogram(audio).squeeze(0)
 
-            # 멀티채널인 경우 mono로 변환
-            if audio.shape[0] > 1:
-                audio = torch.mean(audio, dim=0, keepdim=True)
+                return {"mel_spec": mel_spec, "text": text}
+            except RuntimeError as e:
+                # print(f"[⚠️] Sample skipped at index {index} due to error: {e}")
+                index = (index + 1) % len(self.data)
+                continue
 
-            # 리샘플링
-            if source_sample_rate != self.target_sample_rate:
-                resampler = torchaudio.transforms.Resample(source_sample_rate, self.target_sample_rate)
-                audio = resampler(audio)
-
-            # 멜 스펙트로그램 변환
-            mel_spec = self.mel_spectrogram(audio)
-            mel_spec = mel_spec.squeeze(0)
-
-        return {"mel_spec": mel_spec, "text": text}
 
 # Dynamic Batch Sampler
 class DynamicBatchSampler(Sampler[list[int]]):
@@ -291,22 +290,24 @@ def load_dataset(
     dataset_type    - "CustomDataset" if you want to use tokenizer name and default data path to load for train_dataset
                     - "CustomDatasetPath" if you just want to pass the full path to a preprocessed dataset without relying on tokenizer
     """
+
     print("Loading dataset ...")
-    
+    print("ASDFASDFASDF", dataset_name)
     # S3 경로 지원: dataset_name이 S3 URL("s3://")으로 시작하면
     if dataset_name.startswith("s3://"):
         # 임시 폴더를 생성하여 S3 파일들을 다운로드합니다.
         temp_dir = tempfile.mkdtemp()
+        print("Temporary director:", temp_dir)
         try:
             # raw.arrow 파일 다운로드
             raw_s3_path = os.path.join(dataset_name, "raw.arrow")
             local_raw = os.path.join(temp_dir, "raw.arrow")
+            print("Local Raw", local_raw)
             download_from_s3(raw_s3_path, local_raw)
             # duration.json 파일 다운로드
             duration_s3_path = os.path.join(dataset_name, "duration.json")
             local_duration = os.path.join(temp_dir, "duration.json")
             download_from_s3(duration_s3_path, local_duration)
-            
             # 데이터셋 로드: Arrow 파일이 Dataset 폴더 형식이 아닐 경우 from_file()를 사용
             try:
                 train_dataset = load_from_disk(local_raw)
