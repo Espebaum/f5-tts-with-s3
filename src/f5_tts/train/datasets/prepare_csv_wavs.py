@@ -43,11 +43,17 @@ def merge_vocab_and_save(pretrained_s3_path, current_vocab_path, output_s3_path)
         bucket, key = parse_s3_path(s3_path)
         s3 = boto3.client("s3", region_name="ap-northeast-2")
         response = s3.get_object(Bucket=bucket, Key=key)
-        return [line.strip() for line in response["Body"].read().decode("utf-8").splitlines() if line.strip()]
+        lines = response["Body"].read().decode("utf-8").splitlines()
+        # 🧹 remove empty lines and corrupted lines like '�'
+        cleaned = [line.strip() for line in lines if line.strip() and '�' not in line]
+        return cleaned
 
     def read_vocab_from_local(path):
         with open(path, "r", encoding="utf-8") as f:
-            return [line.strip() for line in f if line.strip()]
+            lines = f.read().splitlines()
+        # 🧹 remove empty lines and corrupted lines like '�'
+        cleaned = [line.strip() for line in lines if line.strip() and '�' not in line]
+        return cleaned
 
     def write_vocab_to_s3(vocab_list, s3_path):
         bucket, key = parse_s3_path(s3_path)
@@ -200,69 +206,104 @@ def get_audio_duration_s3(s3_path: str, region="ap-northeast-2"):
 
 def prepare_csv_wavs_dir(input_dir, wav_root=None, num_workers=None):
     """
-    새로운 형식의 metadata (id,wav,text,duration,...)를 처리하는 함수.
-    - input_dir: metadata 파일들이 들어있는 S3 prefix (e.g. s3://bucket/path/to/metadata/)
-    - wav_root: 실제 wav/mp3 파일들이 있는 S3 prefix (e.g. s3://bucket/Emilia-dataset/YODAS/KO)
+    metadata.csv 에 duration 열이 없는 경우 직접 계산해서 S3에 덮어씌움
     """
-    assert input_dir.startswith("s3://"), "Only S3 input is currently supported."
+    print(f"📥 입력 경로: {input_dir}")
     s3 = boto3.client("s3", region_name="ap-northeast-2")
     bucket, prefix = parse_s3_path(input_dir)
-
+    print(f"🔍 S3 버킷: {bucket}, 접두사: {prefix}")
+    
     response = s3.list_objects_v2(Bucket=bucket, Prefix=prefix)
     metadata_keys = [content["Key"] for content in response.get("Contents", []) if content["Key"].endswith(".csv")]
-
-    print(f"📦 Total metadata files: {len(metadata_keys)}")
+    
+    if not metadata_keys:
+        raise ValueError(f"❌ No metadata.csv files found in {input_dir}")
+    print(f"📄 총 메타데이터 CSV 파일 수: {len(metadata_keys)}")
 
     audio_text_pairs = []
+
     for key in metadata_keys:
-        response = s3.get_object(Bucket=bucket, Key=key)
-        content = response["Body"].read().decode("utf-8-sig").splitlines()
+        print(f"\n📥 처리 중: s3://{bucket}/{key}")
+        obj = s3.get_object(Bucket=bucket, Key=key)
+        content = obj["Body"].read().decode("utf-8-sig").splitlines()
         reader = csv.DictReader(content)
+        
+        needs_update = "duration" not in reader.fieldnames
+        if needs_update:
+            print(f"⚠️ duration 열이 없음 → 계산하여 추가 예정")
 
-        for row in reader:
-            file_path = row["id"]
-            text = row["text"].strip()
-            wav_subfolder = row.get("sub", "").strip()
-            duration_str = row.get("duration", "").strip()
+        updated_rows = []
 
-            # 경로 확장자 보장
-            if not file_path.endswith(".mp3"):
-                file_path += ".mp3"
-
-            # S3 오디오 경로 구성
-            if wav_root:
-                audio_path = os.path.join(wav_root.rstrip("/"), wav_subfolder, file_path)
-            else:
-                audio_path = f"s3://{bucket}/{file_path}"
-
+        for idx, row in enumerate(reader):
             try:
-                duration = float(duration_str)
+                file_path = row["id"].strip()
+                text = row["text"].strip()
+                wav_subfolder = row.get("sub", "").strip()
+
+                if wav_root:
+                    if wav_subfolder:
+                        wav_subfolder = wav_subfolder.rstrip("/") + "/"
+                        audio_path = f"{wav_root.rstrip('/')}/{wav_subfolder}{file_path}"
+                    else:
+                        audio_path = f"{wav_root.rstrip('/')}/{file_path}"
+                else:
+                    audio_path = f"s3://{bucket}/{file_path}"
+
+                # duration 처리
+                duration = None
+                if not needs_update:
+                    try:
+                        duration = float(row.get("duration", "").strip())
+                    except:
+                        pass
+                if duration is None:
+                    try:
+                        print(f"🔍 ({idx}) duration 추정 중 → {audio_path}")
+                        bkt, key_path = parse_s3_path(audio_path)
+                        audio_obj = s3.get_object(Bucket=bkt, Key=key_path)
+                        audio_bytes = io.BytesIO(audio_obj["Body"].read())
+                        waveform, sr = torchaudio.load(audio_bytes)
+                        duration = waveform.shape[1] / sr
+                        row["duration"] = f"{duration:.3f}"
+                        row.pop(None, None)  # 🧹 None 키 제거
+                        needs_update = True
+                        print(f"✅ duration: {duration:.3f} sec")
+                    except Exception as e:
+                        print(f"⚠️ {audio_path} duration 계산 실패: {e}")
+                        continue
+
                 audio_text_pairs.append((audio_path, text, duration))
-            except ValueError:
-                print(f"⚠️ Skipping {audio_path}: invalid duration '{duration_str}'")
-                continue
+                updated_rows.append(row)
 
-    print(f"🎧 Total valid audio-text-duration triples: {len(audio_text_pairs)}")
+            except Exception as e:
+                print(f"❌ 행 처리 실패 (index {idx}): {e}")
 
-    results = []
-    durations = []
-    vocab_set = set()
+        # S3 metadata.csv 덮어쓰기
+        if needs_update:
+            print(f"📤 duration 추가된 metadata.csv 덮어쓰기 → s3://{bucket}/{key}")
+            output_io = io.StringIO()
+            fieldnames = list(updated_rows[0].keys())
+            writer = csv.DictWriter(output_io, fieldnames=fieldnames)
+            writer.writeheader()
+            for row in updated_rows:
+                row.pop(None, None)  # 안전하게 None 키 제거
+                writer.writerow(row)
+            s3.put_object(Bucket=bucket, Key=key, Body=output_io.getvalue().encode("utf-8-sig"))
+            print(f"✅ S3 업데이트 완료")
 
-    for audio_path, text, duration in tqdm(audio_text_pairs, desc="Processing audio metadata"):
-        try:
-            results.append({
-                "audio_path": audio_path,
-                "text": text,
-                "duration": duration
-            })
-            durations.append(duration)
-            vocab_set.update(list(text))
-        except Exception as e:
-            print(f"❌ Error handling row {audio_path}: {e}")
+    print(f"\n🎧 총 유효한 (audio, text, duration) 샘플 수: {len(audio_text_pairs)}")
 
-    print(f"✅ Final result size: {len(results)}")
+    results, durations, vocab_set = [], [], set()
+    for audio_path, text, duration in tqdm(audio_text_pairs, desc="📦 최종 결과 정리 중"):
+        results.append({"audio_path": audio_path, "text": text, "duration": duration})
+        durations.append(duration)
+        vocab_set.update(list(text))
+
+    print(f"✅ 최종 result 객체 길이: {len(results)}")
+    print(f"🔠 고유 문자 수: {len(vocab_set)}")
+    print(f"⏱ 전체 길이 합계: {sum(durations)/3600:.2f} 시간")
+    
     return results, durations, vocab_set
-
 
 
 def get_audio_duration(audio_path, timeout=5):
@@ -431,8 +472,11 @@ def save_prepped_dataset(out_dir, result, duration_list, text_vocab_set, is_fine
         merged_vocab_size = len(text_vocab_set)
 
     if is_s3:
-        # Merge and upload vocab
-        merged_vocab_s3_path = "s3://kmpark-seoul/vocab.txt"
+        # Merge and upload vocab (데이터셋 변경시 변경)
+        # merged_vocab_s3_path = "s3://kmpark-seoul/vocab.txt"
+        merged_vocab_s3_path = out_dir + "/vocab.txt"
+        print(f"☁️ Merging vocab and uploading to: {merged_vocab_s3_path}")
+        exit()
         if not is_finetune:
             merged_vocab_size = merge_vocab_and_save(
                 pretrained_s3_path="s3://kmpark-seoul/pretrained/vocab.txt",

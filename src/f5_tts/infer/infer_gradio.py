@@ -61,23 +61,23 @@ def download_s3_file(s3_path: str, local_path: str, region: str = "ap-northeast-
 DEFAULT_TTS_MODEL = "F5-TTS_v1"
 tts_model_choice = DEFAULT_TTS_MODEL
 
-DEFAULT_TTS_MODEL_CFG = [
-    "/mnt/e/home/gyopark/F5-TTS/ckpts/emilia_l40/model_last.pt",
-    "s3://kmpark-seoul/vocab.txt",
-    json.dumps(dict(dim=1024, depth=22, heads=16, ff_mult=2, text_dim=512, conv_layers=4)),
-]
-
 # DEFAULT_TTS_MODEL_CFG = [
-#     "/mnt/e/home/gyopark/F5-TTS/ckpts/emilia_l40/pretrained_F5TTS_v1_Base_extended_direct.safetensors",
+#     "/mnt/e/home/gyopark/F5-TTS/ckpts/emilia_l40/model_14000.pt",
 #     "s3://kmpark-seoul/vocab.txt",
 #     json.dumps(dict(dim=1024, depth=22, heads=16, ff_mult=2, text_dim=512, conv_layers=4)),
 # ]
 
 # DEFAULT_TTS_MODEL_CFG = [
-#     "hf://SWivid/F5-TTS/F5TTS_v1_Base/model_1250000.safetensors",
-#     "/mnt/e/home/gyopark/F5-TTS/data/Emilia_ZH_EN_pinyin/vocab.txt",
+#     "/mnt/e/home/gyopark/F5-TTS/ckpts/kss/pretrained_F5TTS_v1_Base_extended_direct.safetensors",
+#     "s3://kmpark-kss/vocab.txt",
 #     json.dumps(dict(dim=1024, depth=22, heads=16, ff_mult=2, text_dim=512, conv_layers=4)),
 # ]
+
+DEFAULT_TTS_MODEL_CFG = [
+    "hf://SWivid/F5-TTS/F5TTS_v1_Base/model_1250000.safetensors",
+    "/mnt/e/home/gyopark/F5-TTS/data/Emilia_ZH_EN_pinyin/vocab.txt",
+    json.dumps(dict(dim=1024, depth=22, heads=16, ff_mult=2, text_dim=512, conv_layers=4)),
+]
 
 from f5_tts.train.finetune_gradio import expand_model_embeddings
 

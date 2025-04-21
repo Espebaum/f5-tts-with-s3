@@ -91,7 +91,8 @@ def main():
 
     # checkpoint_path = str(files("f5_tts").joinpath(f"../../ckpts/{args.dataset_name}"))
     # 체크포인트를 저장하고자 하는 경로
-    checkpoint_path = "/mnt/e/home/gyopark/F5-TTS/ckpts/emilia_l40"
+    # checkpoint_path = "/mnt/e/home/gyopark/F5-TTS/ckpts/emilia_l40"
+    checkpoint_path = "/mnt/e/home/gyopark/F5-TTS/ckpts/kss"
 
     # Model parameters based on experiment name
 
@@ -190,12 +191,19 @@ def main():
         else:
             vocab_lines = [line.rstrip("\n") for line in vocab_lines_raw]
         print(vocab_lines[:10])  # Print first 10 lines for debugging
-        target_vocab_size = len(vocab_lines) + 1
+        print(vocab_lines[-10:])  # Print last 10 lines for debugging
+        target_vocab_size = len(vocab_lines)
         
+        if vocab_lines and vocab_lines[0] == "":
+            target_vocab_size += 1
         print(f"✅ Target vocab size from tokenizer_path: {target_vocab_size}")
         # 🧠 Expand pretrained checkpoint to match vocab size
         old_ckpt_path = str(cached_path("hf://SWivid/F5-TTS/F5TTS_v1_Base/model_1250000.safetensors"))
-        new_ckpt_path = "/mnt/e/home/gyopark/F5-TTS/ckpts/emilia_l40/pretrained_F5TTS_v1_Base_extended_direct.safetensors"
+
+        # emilia_l40 -> dataset_name
+        # new_ckpt_path = "/mnt/e/home/gyopark/F5-TTS/ckpts/emilia_l40/pretrained_F5TTS_v1_Base_extended_direct.safetensors"
+        new_ckpt_path = checkpoint_path + "pretrained_F5TTS_v1_Base_extended_direct.safetensors"
+        print("new_ckpt_path : ", new_ckpt_path)
 
         # Check current vocab size from checkpoint
         from safetensors.torch import load_file
@@ -249,7 +257,7 @@ def main():
     )
 
     model = CFM( # text_num_embeds=vocab_size
-        transformer=model_cls(**model_cfg, text_num_embeds=len(vocab_char_map)+1, mel_dim=n_mel_channels),
+        transformer=model_cls(**model_cfg, text_num_embeds=vocab_size, mel_dim=n_mel_channels),
         mel_spec_kwargs=mel_spec_kwargs,
         vocab_char_map=vocab_char_map,
     )
