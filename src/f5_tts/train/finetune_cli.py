@@ -92,7 +92,8 @@ def main():
     # checkpoint_path = str(files("f5_tts").joinpath(f"../../ckpts/{args.dataset_name}"))
     # 체크포인트를 저장하고자 하는 경로
     # checkpoint_path = "/mnt/e/home/gyopark/F5-TTS/ckpts/emilia_l40"
-    checkpoint_path = "/mnt/e/home/gyopark/F5-TTS/ckpts/kss"
+    # checkpoint_path = "/mnt/e/home/gyopark/F5-TTS/ckpts/kss"
+    checkpoint_path = "/mnt/e/F5-TTS/ckpts/kss"
 
     # Model parameters based on experiment name
 
@@ -202,7 +203,7 @@ def main():
 
         # emilia_l40 -> dataset_name
         # new_ckpt_path = "/mnt/e/home/gyopark/F5-TTS/ckpts/emilia_l40/pretrained_F5TTS_v1_Base_extended_direct.safetensors"
-        new_ckpt_path = checkpoint_path + "pretrained_F5TTS_v1_Base_extended_direct.safetensors"
+        new_ckpt_path = checkpoint_path + "/pretrained_F5TTS_v1_Base_extended_direct.safetensors"
         print("new_ckpt_path : ", new_ckpt_path)
 
         # Check current vocab size from checkpoint

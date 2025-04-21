@@ -43,7 +43,8 @@ last_ema = None
 
 
 # path_data = str(files("f5_tts").joinpath("../../data"))
-path_data = "/mnt/e/home/gyopark/F5-TTS/data"
+# path_data = "/mnt/e/home/gyopark/F5-TTS/data"
+path_data = "/home/ubuntu/f5/data"
 path_project_ckpts = str(files("f5_tts").joinpath("../../ckpts"))
 file_train = str(files("f5_tts").joinpath("train/finetune_cli.py"))
 
