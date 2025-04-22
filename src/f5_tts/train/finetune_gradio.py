@@ -1034,28 +1034,25 @@ def vocab_count(text):
 import boto3
 import io
 
+
 def write_file_s3(bucket, key, content, content_type="text/plain"):
     """
     S3에 문자열을 파일로 저장하는 함수.
-
-    Args:
-        bucket (str): S3 버킷 이름 (예: "my-bucket")
-        key (str): 저장할 S3 키 경로 (예: "path/to/file.txt")
-        content (str): 저장할 문자열 데이터
-        content_type (str): MIME 타입 (기본값은 text/plain)
-
-    Returns:
-        str: s3:// 경로 문자열
+    오류가 발생해도 속행함.
     """
-    s3 = boto3.client("s3")
-    s3.put_object(
-        Bucket=bucket,
-        Key=key,
-        Body=content.encode("utf-8"),
-        ContentType=content_type
-    )
-    print(f"✅ Uploaded to s3://{bucket}/{key}")
-    return f"s3://{bucket}/{key}"
+    try:
+        s3 = boto3.client("s3")
+        s3.put_object(
+            Bucket=bucket,
+            Key=key,
+            Body=content.encode("utf-8"),
+            ContentType=content_type
+        )
+        print(f"✅ Uploaded to s3://{bucket}/{key}")
+        return f"s3://{bucket}/{key}"
+    except Exception as e:
+        print(f"❌ Failed to upload s3://{bucket}/{key} — {e}")
+        return None  # 또는 "", 또는 raise 안 하고 log만 출력
 
 
 def vocab_extend(project_name, symbols, model_type):
@@ -1122,21 +1119,25 @@ def vocab_extend(project_name, symbols, model_type):
     return f"vocab old size : {len(vocab) - len(miss_symbols)}\nvocab new size : {new_vocab_size}\nvocab add : {len(miss_symbols)}\nnew symbols :\n" + "\n".join(miss_symbols)
 
 def list_csv_keys_in_s3(bucket, prefix):
-    """S3에서 주어진 prefix 하위의 모든 CSV 파일 key를 반환"""
-    s3 = boto3.client("s3", region_name="ap-northeast-2")
-    paginator = s3.get_paginator("list_objects_v2")
-    pages = paginator.paginate(Bucket=bucket, Prefix=prefix)
-    # print(f"[DEBUG] Bucket: {bucket}")
-    # print(f"[DEBUG] Prefix: {prefix}")
-    csv_keys = []
-    for page_number, page in enumerate(pages):
-        # print(f"[DEBUG] Page {page_number} keys:")
-        for obj in page.get("Contents", []):
-            # print("  →", obj["Key"])
-            key = obj["Key"]
-            if key.endswith(".csv"):
-                csv_keys.append(key)
-    return csv_keys
+    """
+    S3에서 주어진 prefix 하위의 모든 CSV 파일 key를 반환
+    오류 발생 시 빈 리스트 반환
+    """
+    try:
+        s3 = boto3.client("s3", region_name="ap-northeast-2")
+        paginator = s3.get_paginator("list_objects_v2")
+        pages = paginator.paginate(Bucket=bucket, Prefix=prefix)
+
+        csv_keys = []
+        for page_number, page in enumerate(pages):
+            for obj in page.get("Contents", []):
+                key = obj["Key"]
+                if key.endswith(".csv"):
+                    csv_keys.append(key)
+        return csv_keys
+    except Exception as e:
+        print(f"⚠️ Failed to list keys from s3://{bucket}/{prefix} — {e}")
+        return []
 
 def read_file_s3(bucket, key):
     s3 = boto3.client("s3", region_name="ap-northeast-2")

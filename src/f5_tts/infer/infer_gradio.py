@@ -67,17 +67,17 @@ tts_model_choice = DEFAULT_TTS_MODEL
 #     json.dumps(dict(dim=1024, depth=22, heads=16, ff_mult=2, text_dim=512, conv_layers=4)),
 # ]
 
-# DEFAULT_TTS_MODEL_CFG = [
-#     "/mnt/e/home/gyopark/F5-TTS/ckpts/kss/pretrained_F5TTS_v1_Base_extended_direct.safetensors",
-#     "s3://kmpark-kss/vocab.txt",
-#     json.dumps(dict(dim=1024, depth=22, heads=16, ff_mult=2, text_dim=512, conv_layers=4)),
-# ]
-
 DEFAULT_TTS_MODEL_CFG = [
-    "hf://SWivid/F5-TTS/F5TTS_v1_Base/model_1250000.safetensors",
-    "/mnt/e/home/gyopark/F5-TTS/data/Emilia_ZH_EN_pinyin/vocab.txt",
+    "/mnt/e/F5-TTS/ckpts/kss/model_16000.pt",
+    "s3://kmpark-kss/vocab.txt",
     json.dumps(dict(dim=1024, depth=22, heads=16, ff_mult=2, text_dim=512, conv_layers=4)),
 ]
+
+# DEFAULT_TTS_MODEL_CFG = [
+#     "hf://SWivid/F5-TTS/F5TTS_v1_Base/model_1250000.safetensors",
+#     "/mnt/e/home/gyopark/F5-TTS/data/Emilia_ZH_EN_pinyin/vocab.txt",
+#     json.dumps(dict(dim=1024, depth=22, heads=16, ff_mult=2, text_dim=512, conv_layers=4)),
+# ]
 
 from f5_tts.train.finetune_gradio import expand_model_embeddings
 
@@ -96,12 +96,12 @@ def load_f5tts():
         vocab_local_path = "/tmp/f5tts_vocab.txt"
         download_s3_file(vocab_path, vocab_local_path)
 
-        # 🔽 마지막 한 줄 제거
-        with open(vocab_local_path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
+        # # 🔽 마지막 한 줄 제거
+        # with open(vocab_local_path, "r", encoding="utf-8") as f:
+        #     lines = f.readlines()
 
-        with open(vocab_local_path, "w", encoding="utf-8") as f:
-            f.writelines(lines[:-1])  # 마지막 줄 제외하고 다시 씀
+        # with open(vocab_local_path, "w", encoding="utf-8") as f:
+        #     f.writelines(lines[:-1])  # 마지막 줄 제외하고 다시 씀
 
         vocab_path = vocab_local_path
 
