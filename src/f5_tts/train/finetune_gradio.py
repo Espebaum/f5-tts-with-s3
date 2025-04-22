@@ -1140,9 +1140,16 @@ def list_csv_keys_in_s3(bucket, prefix):
 
 def read_file_s3(bucket, key):
     s3 = boto3.client("s3", region_name="ap-northeast-2")
-    response = s3.get_object(Bucket=bucket, Key=key)
-    # print(bucket, key)
-    return response["Body"].read().decode("utf-8-sig")
+    try:
+        response = s3.get_object(Bucket=bucket, Key=key)
+        return response["Body"].read().decode("utf-8-sig")
+    except s3.exceptions.NoSuchKey:
+        print(f"⚠️ NoSuchKey: s3://{bucket}/{key} — skipping.")
+        return ""  # 또는 return None
+    except Exception as e:
+        print(f"❌ Failed to read s3://{bucket}/{key} — {e}")
+        return ""
+
 
 def parse_s3_path(s3_path):
     assert s3_path.startswith("s3://"), f"Invalid S3 path: {s3_path}"
@@ -1333,7 +1340,8 @@ def infer(
         if last_ema != use_ema:
             last_ema = use_ema
 
-        vocab_file = os.path.join(path_data, project, "vocab.txt")
+        vocab_file = os.path.join(path_data, "vocab.txt")
+        
         print("vocab_file", vocab_file)
         tts_api = F5TTS(
             model=exp_name, ckpt_file=file_checkpoint, vocab_file=vocab_file, device=device_test, use_ema=use_ema
@@ -1395,9 +1403,11 @@ def check_finetune(finetune):
 
 #     return files_checkpoints, selelect_checkpoint
 
-def get_checkpoints_project(project_name=None, is_gradio=True):
-    ckpt_dir = "/mnt/e/home/gyopark/F5-TTS/ckpts"
 
+# 새로 학습 시 수정
+def get_checkpoints_project(project_name=None, is_gradio=True):
+    # ckpt_dir = "/mnt/e/home/gyopark/F5-TTS/ckpts"
+    ckpt_dir = "/mnt/e/F5-TTS/ckpts"
     if not os.path.isdir(ckpt_dir):
         files_checkpoints = []
     else:
@@ -1996,7 +2006,9 @@ Check the use_ema setting (True or False) for your model to see what works best 
             )
 
             bt_checkpoint_refresh.click(fn=get_checkpoints_project, inputs=[cm_project], outputs=[cm_checkpoint])
+            # bt_checkpoint_refresh.click(fn=get_checkpoints_project, inputs=[], outputs=[cm_checkpoint])
             cm_project.change(fn=get_checkpoints_project, inputs=[cm_project], outputs=[cm_checkpoint])
+            # cm_project.change(fn=get_checkpoints_project, inputs=[], outputs=[cm_checkpoint])
 
         with gr.TabItem("Prune Checkpoint"):
             gr.Markdown("""```plaintext 
