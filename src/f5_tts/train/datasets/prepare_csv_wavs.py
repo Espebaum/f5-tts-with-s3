@@ -367,7 +367,6 @@ import io
 import csv
 
 def read_audio_text_pairs(csv_file_path):
-    print("ASDFASDF")
     audio_text_pairs = []
     if csv_file_path.startswith("s3://"):
         bucket, key = parse_s3_path(csv_file_path)
